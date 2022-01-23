@@ -1,48 +1,66 @@
-
-# default virtual machines configurations
-$LINUX_DIST="debian/buster64"
-$VM_MEMORY_MB=2048
-$VM_CPU_CORES=2
-
-$MASTER_FQDN="master.kubernetes.cluster"
-$MASTER_IP_ADDR="10.0.0.1"
+# default cluster VM configuration
+master = {
+    :ip => "192.168.254.1",
+    :name => "master.kubernetes.local"
+}
+nodes = [
+    {
+        :ip => "192.168.254.2",
+        :name => "node-1.kubernetes.local"
+    }
+]
 
 Vagrant.configure("2") do |config|  
-    config.vm.box = $LINUX_DIST
-
+    config.vm.box = "debian/buster64"
     # shared folder for data sharing between master and nodes
     config.vm.synced_folder "./", "/shared"
-
-    # virtual machines computing resources
-    config.vm.provider "virtualbox" do |vbox|
-        vbox.memory = $VM_MEMORY_MB
-        vbox.cpus = $VM_CPU_CORES
-    end
-
-    # kubernetes node master
-    config.vm.define :master do |master|
-        master.vm.hostname = $MASTER_FQDN
-        master.vm.network :private_network, ip: $MASTER_IP_ADDR
-
-        # initialize node master
-        master.vm.provision "shell", 
-            path: "../../kubernetes/install/master/bootstrap",
-            env: {"CONTROL_PLANE_ENDPOINT" => master.vm.hostname}
-
-        # write the join command into the shared folder
-        master.vm.provision "shell", inline:"
-            kubeadm token create --print-join-command > /shared/join"
-    end
-
-    # kubernetes worker node 1
-    config.vm.define :node1 do |node1|
-        node1.vm.hostname = "node1.cluster.local"
-        node1.vm.network :private_network, ip: "10.0.0.2"
-        # run the join command from the shared folder
-        node1.vm.provision "shell", inline:"echo %s %s >> /etc/hosts" % [$MASTER_IP_ADDR,$MASTER_FQDN]
-        node1.vm.provision "shell", inline:"source /shared/join"
-    end
-    
     # install the nodes dependencies (docker, kubectl, kubeadm, etc)
-    config.vm.provision "shell", path: "../../kubernetes/install/node/bootstrap/debian"
+    config.vm.provision "shell", 
+        path: "../../kubernetes/install/node/bootstrap/debian"
+    # default vm configuratons
+    config.vm.provider "virtualbox" do |vm|
+        vm.memory =  2048
+        vm.cpus = 2
+    end
+    # create the kubernetes master node
+    config.vm.define master[:name] do |config|
+        config.vm.hostname = master[:name]  
+        # assign a private ip to the master
+        config.vm.network :private_network, 
+            ip: master[:ip], 
+            auto_config: false
+        # initialize control plane
+        config.vm.provision "shell", 
+            path: "../../kubernetes/install/master/bootstrap",
+            env: {"CONTROL_PLANE_ENDPOINT" => master[:name]}              
+        # copy the kube.config to the shared directory so it can be used to admin the cluster
+        config.vm.provision "shell", inline:"
+            cp /etc/kubernetes/admin.conf /shared/kube.config"
+        # write the join command into the shared folder
+        config.vm.provision "shell", 
+            inline:" kubeadm token create --print-join-command > /shared/join.cmd"
+        # expose kubernetes api server 
+        config.vm.network "forwarded_port", 
+            guest: 6443, 
+            host: 6443
+    end
+    # setup kubernetes worker node
+    nodes.each do |node|
+        config.vm.define node[:name] do |config|
+            # set the vm hostnamez
+            config.vm.hostname = node[:name]
+            # assign a private ip to the master
+            config.vm.network :private_network, 
+                ip: node[:ip], 
+                auto_config: false
+            # write the master hotname into the hosts file
+            config.vm.provision "shell", 
+                inline:"echo '%s \t %s' >> /etc/hosts" % [master[:ip],master[:name]]
+            # join the worker node on the cluster
+            config.vm.define node[:name] do |config|
+                config.vm.provision "shell", 
+                    inline:"source /shared/join.cmd"                
+            end           
+        end           
+    end
 end
